@@ -1,0 +1,106 @@
+#!/bin/bash
+
+opt_err=0
+opt_L=0
+opt_l=0
+cc=3
+incl=""
+excl=""
+params=()
+
+ORIG_IFS=$IFS; IFS=""
+while [ -n "$1" ]
+do
+  case "$1" in
+    -L) opt_L=1;;
+    -l) opt_l=1;;
+    -c) cc="$2"; re='^[0-9]+$'
+        if ! [[ $cc =~ $re ]]; then echo "ERR: Неверно указано количество хранимых копий"; opt_err=1; fi
+        shift;;
+    -i) incl="$2"; shift;;
+    -e) excl="$2"; shift;;
+    -*) echo "Неизвестная опция $1"; opt_err=1;;
+    *) params+=( $1 );;
+  esac
+  shift
+done
+IFS=$ORIG_IFS
+
+LOGFILE="/var/log/zbkvm.log"
+
+function wlog()
+{
+  while read text
+  do
+    echo "$text"
+    if [[ $opt_L -eq 0 ]]; then echo "$(date "+%Y-%m-%d %T") $text" >> $LOGFILE; fi
+  done
+}
+
+if [[ ${#params[*]} -ne 1 ]]; then echo "ERR: Неверно указаны параметры" | wlog; fi
+
+if [[ $opt_err -eq 1 ]] || [[ ${#params[*]} -ne 1 ]]
+then
+  echo
+  echo "Резервное копирование KVM с дисками находящимися в наборах данных ZFS"
+  echo
+  echo "Команда:"
+  echo "zbkvm [-L] [-l] [-c <countcopies>] [-i \"<vm1> [<vm2>...[<vmN>]]\"] [-e \"<vm1> [<vm2>...[<vmN>]]\"] <backupdir>"
+  echo "-L Отключить логирование"
+  echo "-l Только запущенные виртуальные машины"
+  echo "-c Количество хранимых копий"
+  echo "-i Только виртуальные машины по списку"
+  echo "-e Исключить виртуальные машины по списку"
+  echo
+  exit 1
+fi
+
+backup_dir=${params[0]}
+
+if ! [ -d $backup_dir/ ]; then echo "ERR: Не найдена папка для резервных копий $backup_dir" | wlog; exit 1; fi
+
+data=$(date +%Y-%m-%d)
+if [[ $opt_l -eq 0 ]]; then live=" --all"; else live=""; fi
+if [[ -n $incl ]]; then gf1="grep -E -w -i $(echo $incl | tr -s ' ' '|')"; else gf1="cat"; fi
+if [[ -n $excl ]]; then gf2="grep -v -E -w -i $(echo $excl | tr -s ' ' '|')"; else gf2="cat"; fi
+vm=$(virsh list$live | grep . | awk '{print $2}' | sed 1,2d | $gf1 | $gf2)
+
+for activevm in $vm
+do
+  echo "VM: $activevm" | wlog
+  echo "Создаем папку для сегодняшних копий" | wlog
+  mkdir -p $backup_dir/$activevm/$data 2>&1 | wlog
+  if [[ ${PIPESTATUS[0]} -ne 0 ]]; then echo "ERR: Ошибка при создании папки $backup_dir/$activevm/$data" | wlog; exit 1; fi
+
+  echo "Копируем конфигурацию в $backup_dir/$activevm/$data/$activevm.xml" | wlog
+  virsh dumpxml $activevm > $backup_dir/$activevm/$data/$activevm.xml
+
+  disk_path=$(virsh domblklist $activevm --details | grep disk | awk '{print $4}')
+
+  echo "Копируем диски" | wlog
+  for path in $disk_path
+  do
+    dataset=$(zfs get -H -o name mountpoint $path)
+    if [ -z "$dataset" ]
+    then
+      echo "Не найден пул zfs для $path" | wlog
+    else
+      dataset_dir=$(zfs get -H -o value mountpoint $dataset)
+      snap_name='now'
+      snap=$dataset@$snap_name
+      snap_dir=$dataset_dir'/.zfs/snapshot/'$snap_name
+      echo "Создаем снимок $snap" | wlog
+      zfs snapshot $snap 2>&1 | wlog
+      echo "Копируем $path" | wlog
+      cp -rv ${path/$dataset_dir/$snap_dir} $backup_dir/$activevm/$data/ 2>&1 | wlog
+      echo "Удаляем снимок $snap" | wlog
+      zfs destroy $snap 2>&1 | wlog
+    fi
+  done
+
+  echo "Удаляем устаревшие копии" | wlog
+  find $backup_dir/$activevm/20[0-3][0-9]-[0-1][0-9]-[0-3][0-9] -type d -empty -delete 2>&1 | wlog
+  ls -rd $backup_dir/$activevm/20[0-3][0-9]-[0-1][0-9]-[0-3][0-9] | tail -n +$(($cc+1)) | xargs -r rm -rv 2>&1 | wlog
+done
+
+echo "Резервное копирование завершено" | wlog
