@@ -73,29 +73,43 @@ do
   if [[ ${PIPESTATUS[0]} -ne 0 ]]; then echo "ERR: Ошибка при создании папки $backup_dir/$activevm/$data" | wlog; exit 1; fi
 
   echo "Копируем конфигурацию в $backup_dir/$activevm/$data/$activevm.xml" | wlog
-  virsh dumpxml $activevm > $backup_dir/$activevm/$data/$activevm.xml
+  virsh dumpxml $activevm > $backup_dir/$activevm/$data/$activevm.xml 2>&1 | wlog
 
   disk_path=$(virsh domblklist $activevm --details | grep disk | awk '{print $4}')
 
-  echo "Копируем диски" | wlog
+  snap='now'
+  datasets=()
   for path in $disk_path
   do
     dataset=$(zfs get -H -o name mountpoint $path)
-    if [ -z "$dataset" ]
+    if [[ -n "$dataset" ]]; then datasets+=( $dataset ); fi
+  done
+  datasets=$(printf "%s\n" "${datasets[@]}" | sort -u)
+
+  for dataset in $datasets
+  do
+    echo "Создаем снимок $dataset@$snap" | wlog
+    zfs snapshot $dataset@$snap 2>&1 | wlog
+  done
+
+  for path in $disk_path
+  do
+    dataset=$(zfs get -H -o name mountpoint $path)
+    if [[ -n "$dataset" ]]
     then
-      echo "Не найден пул zfs для $path" | wlog
-    else
       dataset_dir=$(zfs get -H -o value mountpoint $dataset)
-      snap_name='now'
-      snap=$dataset@$snap_name
-      snap_dir=$dataset_dir'/.zfs/snapshot/'$snap_name
-      echo "Создаем снимок $snap" | wlog
-      zfs snapshot $snap 2>&1 | wlog
+      snap_dir=$dataset_dir'/.zfs/snapshot/'$snap
       echo "Копируем $path" | wlog
       cp -rv ${path/$dataset_dir/$snap_dir} $backup_dir/$activevm/$data/ 2>&1 | wlog
-      echo "Удаляем снимок $snap" | wlog
-      zfs destroy $snap 2>&1 | wlog
+    else
+      echo "Не найден пул zfs для $path" | wlog
     fi
+  done
+
+  for dataset in $datasets
+  do
+    echo "Удаляем снимок $dataset@$snap" | wlog
+    zfs destroy $dataset@$snap 2>&1 | wlog
   done
 
   echo "Удаляем устаревшие копии" | wlog
