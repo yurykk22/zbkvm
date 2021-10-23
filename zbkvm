@@ -57,7 +57,7 @@ fi
 
 backup_dir=${params[0]}
 
-if ! [ -d $backup_dir/ ]; then echo "ERR: Не найдена папка для резервных копий $backup_dir" | wlog; exit 1; fi
+if ! [[ -d $backup_dir/ ]]; then echo "ERR: Не найдена папка для резервных копий $backup_dir" | wlog; exit 1; fi
 
 data=$(date +%Y-%m-%d)
 if [[ $opt_l -eq 0 ]]; then live=" --all"; else live=""; fi
@@ -68,11 +68,11 @@ vm=$(virsh list$live | grep . | awk '{print $2}' | sed 1,2d | $gf1 | $gf2)
 for activevm in $vm
 do
   echo "VM: $activevm" | wlog
-  echo "Создаем папку для сегодняшних копий" | wlog
+  echo "Создание папки для текущих копий \'$backup_dir/$activevm/$data\'" | wlog
   mkdir -p $backup_dir/$activevm/$data 2>&1 | wlog
   if [[ ${PIPESTATUS[0]} -ne 0 ]]; then echo "ERR: Ошибка при создании папки $backup_dir/$activevm/$data" | wlog; exit 1; fi
 
-  echo "Копируем конфигурацию в $backup_dir/$activevm/$data/$activevm.xml" | wlog
+  echo "Копирование конфигурации \'$activevm\' в \'$backup_dir/$activevm/$data/$activevm.xml\'" | wlog
   virsh dumpxml $activevm > $backup_dir/$activevm/$data/$activevm.xml 2>&1 | wlog
 
   disk_path=$(virsh domblklist $activevm --details | grep disk | awk '{print $4}')
@@ -88,10 +88,11 @@ do
 
   for dataset in $datasets
   do
-    echo "Создаем снимок $dataset@$snap" | wlog
+    echo "Создание снимка $dataset@$snap" | wlog
     zfs snapshot $dataset@$snap 2>&1 | wlog
   done
 
+  echo "Копирование дисков" | wlog
   for path in $disk_path
   do
     dataset=$(zfs get -H -o name mountpoint $path)
@@ -99,8 +100,8 @@ do
     then
       dataset_dir=$(zfs get -H -o value mountpoint $dataset)
       snap_dir=$dataset_dir'/.zfs/snapshot/'$snap
-      echo "Копируем $path" | wlog
-      cp -rv ${path/$dataset_dir/$snap_dir} $backup_dir/$activevm/$data/ 2>&1 | wlog
+      echo "\'${path/$dataset_dir/$snap_dir}\' -> \'$backup_dir/$activevm/$data/$(basename $path)\'" | wlog
+      cp -r ${path/$dataset_dir/$snap_dir} $backup_dir/$activevm/$data/ 2>&1 | wlog
     else
       echo "Не найден пул zfs для $path" | wlog
     fi
@@ -108,11 +109,11 @@ do
 
   for dataset in $datasets
   do
-    echo "Удаляем снимок $dataset@$snap" | wlog
+    echo "Удаление снимка $dataset@$snap" | wlog
     zfs destroy $dataset@$snap 2>&1 | wlog
   done
 
-  echo "Удаляем устаревшие копии" | wlog
+  echo "Удаление устаревших копий" | wlog
   find $backup_dir/$activevm/20[0-3][0-9]-[0-1][0-9]-[0-3][0-9] -type d -empty -delete 2>&1 | wlog
   ls -rd $backup_dir/$activevm/20[0-3][0-9]-[0-1][0-9]-[0-3][0-9] | tail -n +$(($cc+1)) | xargs -r rm -rv 2>&1 | wlog
 done
